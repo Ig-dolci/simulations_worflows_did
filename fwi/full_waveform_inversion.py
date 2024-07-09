@@ -95,8 +95,11 @@ for step in range(total_steps):
         break
 
 
-# from firedrake.adjoint import *
-# continue_annotation()
+from firedrake.adjoint import *
+continue_annotation()
+tape = get_working_tape()
+from checkpoint_schedules import Revolve
+tape.enable_checkpointing(Revolve(total_steps, 10))
 
 f = Cofunction(V.dual())  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_guess, f, dt, V)
@@ -104,7 +107,7 @@ interpolate_receivers = interpolate(u_np1, V_r)
 J_val = 0.0
 misfit_data = []
 output_file1 = VTKFile(model["path"] + "outputs/guess_data_3.pvd")
-for step in range(total_steps):
+for step in tape.timestepper(range(total_steps)):
     f.assign(ricker_wavelet(step * dt, frequency_peak) * q_s)
     solver.solve()
     u_nm1.assign(u_n)
@@ -120,12 +123,12 @@ for step in range(total_steps):
         raise ValueError("The simulation has diverged.")
         break
 
-with CheckpointFile(model["path"] + "outputs/unp1.h5", 'w') as afile:
-    afile.save_function(u_np1)
+# with CheckpointFile(model["path"] + "outputs/unp1.h5", 'w') as afile:
+#     afile.save_function(u_np1)
 # save the misfit data
 np.save(model["path"] + "outputs/misfit_data_3.npy", misfit_data)
 
-# J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
+J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
 
 # c_optimised = minimize(
 #     J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 1},
