@@ -73,7 +73,7 @@
 # processes to be used in each member of the ensemble (2, in this case)::
 
 from firedrake import *
-M = 2
+M = 1
 my_ensemble = Ensemble(COMM_WORLD, M)
 # hide warnings
 import warnings
@@ -254,7 +254,10 @@ c_guess = Function(V).interpolate(1.5)
 
 from firedrake.adjoint import *
 continue_annotation()
-
+tape = get_working_tape()
+from checkpoint_schedules import Revolve
+tape.enable_checkpointing(Revolve(total_steps, 10))
+# tape.progress_bar = ProgressBar
 # **Steps 2-3**: Solve the wave equation and compute the functional::
 
 f = Cofunction(V.dual())  # Wave equation forcing term.
@@ -271,7 +274,7 @@ for step in range(total_steps):
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
 
 # We now instantiate :class:`~.EnsembleReducedFunctional`::
-# get_working_tape().progress_bar = ProgressBar
+get_working_tape().progress_bar = ProgressBar
 J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
 
 # which enables us to recompute :math:`J` and its gradient :math:`\nabla_{\mathtt{c\_guess}} J`,
@@ -283,23 +286,27 @@ J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
 # is then passed as an argument to the ``minimize`` function::
 
 from pyadjoint import TAOSolver, MinimizationProblem
-# c_optimised = minimize(J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 20},
-#                         bounds=(1.5, 2.0), derivative_options={"riesz_representation": 'l2'}
-#                         )
+c_optimised = minimize(J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 20},
+                        bounds=(1.5, 2.0), derivative_options={"riesz_representation": 'l2'}
+                        )
 lb = 1.5
 up = 2.0
-problem = MinimizationProblem(J_hat, bounds=(lb, up))
-solver = TAOSolver(
-    problem, {"tao_type": "bqnls",
-              "tao_gatol": 1.0e-4,
-              "tao_grtol": 0.0,
-              "tao_gttol": 0.0,
-              "tao_monitor": True},
-    comm=my_ensemble.comm,
-    convert_options=({"riesz_representation": "l2"}))
+# problem = MinimizationProblem(J_hat, bounds=(lb, up))
+# solver = TAOSolver(
+#     problem, {"tao_type": "bqlns"
+#             #   "tao_max_it": 2,
+#             #   "tao_gatol": 1.0e-4,
+#             #   "tao_grtol": 0.0,
+#               "tao_gttol": 1.0e-1,
+#               "tao_monitor": True,
+#               "tao_view": True,
+#               },
+#     comm=my_ensemble.comm,
+#     convert_options=({"riesz_representation": "l2"}))
 c_optimised = solver.solve()
 
 VTKFile("c_optimised.pvd").write(c_optimised)
+print(get_working_tape().recompute_count)
 
 # The ``minimize`` function executes the optimisation algorithm until the stopping criterion (``maxiter``) is met.
 # For 20 iterations, the predicted velocity model is shown in the following figure.

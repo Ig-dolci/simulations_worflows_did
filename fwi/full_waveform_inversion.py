@@ -5,7 +5,7 @@ from firedrake.__future__ import interpolate
 import numpy as np
 import scipy.ndimage
 # read a hdf5 file
-M = 1
+M = 4
 my_ensemble = Ensemble(COMM_WORLD, M)
 num_sources = my_ensemble.ensemble_comm.size
 source_number = my_ensemble.ensemble_comm.rank
@@ -16,7 +16,7 @@ mesh = Mesh(
                 "overlap_type": (DistributedMeshOverlapType.NONE, 0)
             }, name="mesh"
 )
-V = FunctionSpace(mesh, "KMV", 1)
+V = FunctionSpace(mesh, "KMV", 4)
 c_true = model_interpolate(model, mesh, V, guess=False, name="c_true")
 VTKFile(model["path"] + "outputs/true_model.pvd").write(c_true)
 c_guess = Function(V, name="c_guess")
@@ -67,7 +67,7 @@ def wave_equation_solver(c, source_function, dt, V):
     nf = (1 / c) * ((u_n - u_nm1) / dt) * v * ds
     a = dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
     F = time_term + a + nf
-    lin_var = LinearVariationalProblem(lhs(F), rhs(F) + source_function, u_np1)
+    lin_var = LinearVariationalProblem(lhs(F), rhs(F) + source_function, u_np1, constant_jacobian=True)
     solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
     solver = LinearVariationalSolver(lin_var,solver_parameters=solver_parameters)
     return solver, u_np1, u_n, u_nm1
@@ -88,7 +88,7 @@ for step in range(total_steps):
     u_n.assign(u_np1)
     true_data_receivers.append(assemble(interpolate_receivers))
     if step % model["timeaxis"]["fspool"] == 0:
-        print("Writing step %d" % step)
+        print("Writing step %d" % step, flush=True)
         output_file.write(u_np1)
     if norm(u_np1) > 1e10:
         raise ValueError("The simulation has diverged.")
@@ -100,14 +100,14 @@ continue_annotation()
 tape = get_working_tape()
 from checkpoint_schedules import Revolve
 tape.enable_checkpointing(Revolve(total_steps, 10))
-
+tape.progress_bar = ProgressBar
 f = Cofunction(V.dual())  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_guess, f, dt, V)
 interpolate_receivers = interpolate(u_np1, V_r)
 J_val = 0.0
 misfit_data = []
 output_file1 = VTKFile(model["path"] + "outputs/guess_data_3.pvd")
-for step in tape.timestepper(range(total_steps)):
+for step in tape.timestepper(iter(range(total_steps))):
     f.assign(ricker_wavelet(step * dt, frequency_peak) * q_s)
     solver.solve()
     u_nm1.assign(u_n)
@@ -117,7 +117,7 @@ for step in tape.timestepper(range(total_steps)):
     misfit_data.append(guess_receiver.dat.data_ro - true_data_receivers[step].dat.data_ro)
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
     if step % model["timeaxis"]["fspool"] == 0:
-        print("Writing step %d" % step)
+        print("Writing step %d" % step, flush=True)
         output_file1.write(u_np1)
     if J_val > 1e10:
         raise ValueError("The simulation has diverged.")
@@ -130,7 +130,7 @@ np.save(model["path"] + "outputs/misfit_data_3.npy", misfit_data)
 
 J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
 
-# c_optimised = minimize(
-#     J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 1},
-#     bounds=(1.5, 3.5), derivative_options={"riesz_representation": 'l2'}
-# )
+c_optimised = minimize(
+    J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 10},
+    bounds=(1.5, 3.5), derivative_options={"riesz_representation": 'l2'}
+)
