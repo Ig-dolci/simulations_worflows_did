@@ -5,13 +5,13 @@ from firedrake.__future__ import interpolate
 import numpy as np
 import scipy.ndimage
 # read a hdf5 file
-M = 4
+M = 1
 my_ensemble = Ensemble(COMM_WORLD, M)
 num_sources = my_ensemble.ensemble_comm.size
 source_number = my_ensemble.ensemble_comm.rank
 
 mesh = Mesh(
-    model["path"] + 'inputs/mm1.msh', comm=my_ensemble.comm,
+    model["path"] + 'inputs/marmousi.msh', comm=my_ensemble.comm,
     distribution_parameters={
                 "overlap_type": (DistributedMeshOverlapType.NONE, 0)
             }, name="mesh"
