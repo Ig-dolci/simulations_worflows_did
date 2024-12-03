@@ -7,30 +7,19 @@ import finat
 # use parser to get the number of sources
 from argparse import ArgumentParser
 from firedrake.__future__ import interpolate
-warnings.filterwarnings("ignore")
-parser = ArgumentParser()
-ensemble = parser.add_argument("--ensemble", type=str, default="True")
-args = parser.parse_args()
-
-M = 2
-if args.ensemble == "True":
-    my_ensemble = Ensemble(COMM_WORLD, M)
-    num_sources = my_ensemble.ensemble_comm.size
-    source_number = my_ensemble.ensemble_comm.rank
-    mesh = UnitSquareMesh(200, 200, comm=my_ensemble.comm)
-else:
-    my_ensemble = None
-    num_sources = 1
-    source_number = 0
-    mesh = UnitSquareMesh(200, 200)
+M = 1
+my_ensemble = Ensemble(COMM_WORLD, M)
+num_sources = my_ensemble.ensemble_comm.size
+source_number = my_ensemble.ensemble_comm.rank
+mesh = UnitSquareMesh(20, 20, comm=my_ensemble.comm)
 
 source_locations = np.linspace((0.3, 0.1), (0.7, 0.1), num_sources)
 receiver_locations = np.linspace((0.2, 0.9), (0.8, 0.9), 20)
-dt = 0.0005  # time step in seconds
-final_time = 0.8  # final time in seconds
+dt = 0.001  # time step in seconds
+final_time = 1.0  # final time in seconds
 frequency_peak = 7.0  # The dominant frequency of the Ricker wavelet in Hz.
 
-V = FunctionSpace(mesh, "KMV", 1)
+V = FunctionSpace(mesh, "KMV", 3)
 x, z = SpatialCoordinate(mesh)
 c_true = Function(V).interpolate(1.75 + 0.25 * tanh(200 * (0.125 - sqrt((x - 0.5) ** 2 + (z - 0.5) ** 2))))
 
@@ -108,32 +97,26 @@ for step in tape.timestepper(iter(range(total_steps))):
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
 
 # We now instantiate :class:`~.EnsembleReducedFunctional`::
-get_working_tape().progress_bar = ProgressBar
-if my_ensemble:
-    J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
-else:
-    J_hat = ReducedFunctional(J_val, Control(c_guess))
+# get_working_tape().progress_bar = ProgressBar
+J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
 
-# for _ in range(20):
-#     J_hat.derivative()
-c_optimised = minimize(J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 20},
-                        bounds=(1.5, 2.0), derivative_options={"riesz_representation": 'l2'}
-                        )
-# lb = 1.5
-# up = 2.0
-# problem = MinimizationProblem(J_hat, bounds=(lb, up))
-# solver = TAOSolver(
-#     problem, {"tao_type": "bqlns"
-#             #   "tao_max_it": 2,
-#             #   "tao_gatol": 1.0e-4,
-#             #   "tao_grtol": 0.0,
-#               "tao_gttol": 1.0e-1,
-#               "tao_monitor": True,
-#               "tao_view": True,
-#               },
-#     comm=my_ensemble.comm,
-#     convert_options=({"riesz_representation": "l2"}))
-# c_optimised = solver.solve()
 
-VTKFile("c_optimised.pvd").write(c_optimised)
-print(get_working_tape().recompute_count)
+lb = 1.5
+up = 2.0
+
+problem = MinimizationProblem(J_hat, bounds=(lb, up))
+solver = TAOSolver(problem, {"tao_type": "blmvm", "tao_max_it": 20}, comm=my_ensemble.comm)
+outfile = VTKFile("c_optimised_circle.pvd")
+
+
+def convergence_tracker(tao, *, gatol=1.0e-7, max_its=20):
+    its, _, res, _, _, _ = tao.getSolutionStatus()
+    outfile.write(J_hat.controls[0].control)
+    if res < gatol or its >= max_its:
+        tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONVERGED_USER)
+    else:
+        tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONTINUE_ITERATING)
+
+
+solver.tao.setConvergenceTest(convergence_tracker)
+c_optimised = solver.solve()
