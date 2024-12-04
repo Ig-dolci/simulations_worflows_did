@@ -66,8 +66,8 @@ def wave_equation_solver(c, source_function, dt, V):
     time_term = (1 / (c * c)) * (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
     nf = (1 / c) * ((u_n - u_nm1) / dt) * v * ds
     a = dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
-    F = time_term + a + nf
-    lin_var = LinearVariationalProblem(lhs(F), rhs(F) + source_function, u_np1, constant_jacobian=True)
+    F = time_term + a + nf + source_function * v * dx
+    lin_var = LinearVariationalProblem(lhs(F), rhs(F), u_np1, constant_jacobian=True)
     solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
     solver = LinearVariationalSolver(lin_var,solver_parameters=solver_parameters)
     return solver, u_np1, u_n, u_nm1
@@ -77,12 +77,12 @@ V_r = FunctionSpace(receiver_mesh, "DG", 0)
 
 true_data_receivers = []
 total_steps = int(final_time / dt) + 1
-f = Cofunction(V.dual())  # Wave equation forcing term.
+f = Function(V)  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_true, f, dt, V)
 interpolate_receivers = interpolate(u_np1, V_r)
 output_file = VTKFile(model["path"] + "outputs/true_data_3.pvd")
 for step in range(total_steps):
-    f.assign(ricker_wavelet(step * dt, frequency_peak) * q_s)
+    f.assign(q_s.riesz_representation(riesz_map="l2"))
     solver.solve()
     u_nm1.assign(u_n)
     u_n.assign(u_np1)
@@ -98,17 +98,17 @@ for step in range(total_steps):
 from firedrake.adjoint import *
 continue_annotation()
 tape = get_working_tape()
-from checkpoint_schedules import Revolve
-tape.enable_checkpointing(Revolve(total_steps, 10))
-tape.progress_bar = ProgressBar
-f = Cofunction(V.dual())  # Wave equation forcing term.
+from checkpoint_schedules import Revolve, MixedCheckpointSchedule, StorageType
+# tape.enable_checkpointing(MixedCheckpointSchedule(total_steps, 10, storage=StorageType.RAM))
+# tape.progress_bar = ProgressBar
+f = Function(V)  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_guess, f, dt, V)
 interpolate_receivers = interpolate(u_np1, V_r)
 J_val = 0.0
 misfit_data = []
 output_file1 = VTKFile(model["path"] + "outputs/guess_data_3.pvd")
 for step in tape.timestepper(iter(range(total_steps))):
-    f.assign(ricker_wavelet(step * dt, frequency_peak) * q_s)
+    f.assign(q_s.riesz_representation(riesz_map="l2"))
     solver.solve()
     u_nm1.assign(u_n)
     u_n.assign(u_np1)
@@ -129,8 +129,13 @@ for step in tape.timestepper(iter(range(total_steps))):
 np.save(model["path"] + "outputs/misfit_data_3.npy", misfit_data)
 
 J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
+for _ in range(50):
+    print(_)
+    J_hat(c_guess)
+# taylor_test(J_hat, c_guess, Function(V).assign(0.1))
+# c_optimised = minimize(
+#     J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 10},
+#     bounds=(1.5, 4.5), derivative_options={"riesz_representation": 'l2'}
+# )
 
-c_optimised = minimize(
-    J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 10},
-    bounds=(1.5, 3.5), derivative_options={"riesz_representation": 'l2'}
-)
+VTKFile("c_optimised.pvd").write(c_optimised)

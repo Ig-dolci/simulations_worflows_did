@@ -1,14 +1,14 @@
 import numpy as np
 
-path = '/Users/ddolci/tes_fire_install/firedrake_vec_concatenate/src/fwi_simulations/'
+path = '/Users/ddolci/work/firedrake/simulations_worflows_did/fwi/'
 model = {}
 model["mesh"] = {
     "Lz": 3.5,  # depth in km - always positive
     "Lx": 17.0,  # width in km - always positive
     "Ly": 0.0,  # thickness in km - always positive
-    "meshfile": path + "inputs/mm1.msh",
-    "initmodel": path + "inputs/mm1.hdf5",
-    "truemodel": path + "inputs/mm1.hdf5",
+    "meshfile": path + "inputs/marmousi.msh",
+    "initmodel": path + "inputs/marmousi.hdf5",
+    "truemodel": path + "inputs/marmousi.hdf5",
 }
 model["BCs"] = {
     "status": True,  # True or false
@@ -24,16 +24,16 @@ model["BCs"] = {
 
 model["acquisition"] = {
     "source_type": "Ricker",
-    "num_sources": 10,
+    "num_sources": 5,
     "source_pos": np.linspace((-0.01, 14.0), (-0.01, 15.0), 10),
-    "frequency": 5.0,
+    "frequency": 7.0,
     "delay": 1.0,
     "num_receivers": 500,
     "receiver_locations": np.linspace((-0.10, 0.1), (-0.10, 17.0), 500),
 }
 model["timeaxis"] = {
     "t0": 0.0,  # Initial time for event
-    "tf": 4.00,  # Final time for event
+    "tf": 4.0,  # Final time for event
     "dt": 0.001,
     "amplitude": 1,  # the Ricker has an amplitude of 1.
     "nspool": 1000,  # how frequently to output solution to pvds
