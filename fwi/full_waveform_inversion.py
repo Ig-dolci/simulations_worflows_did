@@ -127,15 +127,93 @@ for step in tape.timestepper(iter(range(total_steps))):
 #     afile.save_function(u_np1)
 # save the misfit data
 np.save(model["path"] + "outputs/misfit_data_3.npy", misfit_data)
+outfile = VTKFile("c_optimised_marmousi.pvd")
+water = np.where(c_true.dat.data_ro < 1.51)
 
-J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
-for _ in range(50):
-    print(_)
-    J_hat(c_guess)
+
+def regularise_gradient(functional, dJ, controls, gamma=1.0e-6):
+    outfile.write(controls[0].control)
+    """Tikhonov regularization"""
+    for i0, g in enumerate(dJ):
+        m_u = TrialFunction(V)
+        m_v = TestFunction(V)
+        G = m_u * m_v * dx(scheme=quad_rule) - dot(grad(controls[i0]), grad(m_v)) * dx(scheme=quad_rule)
+        gradreg = Function(V)
+        grad_prob = LinearVariationalProblem(lhs(G), rhs(G), gradreg)
+        grad_solver = LinearVariationalSolver(
+            grad_prob,
+            solver_parameters={
+                "ksp_type": "preonly",
+                "pc_type": "jacobi",
+                "mat_type": "matfree",
+            },
+        )
+        grad_solver.solve()
+        g += gamma * gradreg
+        g.dat.data_wo_with_halos[water] = 0.0
+    return dJ
+
+
+def regularise_functional(func_value, controls):
+    func_value *= 100
+    return func_value
+
+
+J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble,
+                                #   eval_cb_post=regularise_functional,
+                                  derivative_cb_post=regularise_gradient)
+
+lb = 1.5
+up = 4.5
+
 # taylor_test(J_hat, c_guess, Function(V).assign(0.1))
 # c_optimised = minimize(
 #     J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 10},
 #     bounds=(1.5, 4.5), derivative_options={"riesz_representation": 'l2'}
 # )
+# problem = MinimizationProblem(J_hat, bounds=(lb, up))
+# # BQNLS
+# # blmvm
+# # bnls
+# # BNTR
+# solver = TAOSolver(problem, {"tao_type": "blmvm", "tao_max_it": 15}, comm=my_ensemble.comm,
+#                    convert_options={"riesz_representation": "L2"})
+# outfile = VTKFile("c_optimised_circle.pvd")
 
-VTKFile("c_optimised.pvd").write(c_optimised)
+
+# def convergence_tracker(tao, *, gatol=1.0e-7, max_its=15):
+#     its, _, res, _, _, _ = tao.getSolutionStatus()
+#     outfile.write(J_hat.controls[0].control)
+#     if res < gatol or its >= max_its:
+#         tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONVERGED_USER)
+#     else:
+#         tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONTINUE_ITERATING)
+
+
+# solver.tao.setConvergenceTest(convergence_tracker)
+# c_optimised = solver.solve()
+
+problem = MinimizationProblem(J_hat, bounds=(lb, up))
+params = {
+    'General': {
+        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 2}},
+    'Step': {
+        'Type': 'Augmented Lagrangian',
+        'Line Search': {
+            'Descent Method': {
+                'Type': 'Quasi-Newton Step'
+            }
+        },
+        'Augmented Lagrangian': {
+            'Subproblem Step Type': 'Line Search',
+            'Subproblem Iteration Limit': 10
+        }
+    },
+    'Status Test': {
+        'Gradient Tolerance': 1e-7,
+        'Iteration Limit': 3
+    }
+}
+
+solver = ROLSolver(problem, params, inner_product="L2")
+rho_opt = solver.solve()
