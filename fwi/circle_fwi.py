@@ -1,11 +1,11 @@
 from firedrake import *
 from firedrake.adjoint import *
 from pyadjoint import TAOSolver, MinimizationProblem
+from ROL.firedrake_vector import FiredrakeVector as FeVector
+import ROL
 import numpy as np
 import warnings
 import finat
-# use parser to get the number of sources
-from argparse import ArgumentParser
 from firedrake.__future__ import interpolate
 M = 1
 my_ensemble = Ensemble(COMM_WORLD, M)
@@ -16,7 +16,7 @@ mesh = UnitSquareMesh(20, 20, comm=my_ensemble.comm)
 source_locations = np.linspace((0.3, 0.1), (0.7, 0.1), num_sources)
 receiver_locations = np.linspace((0.2, 0.9), (0.8, 0.9), 20)
 dt = 0.001  # time step in seconds
-final_time = 1.0  # final time in seconds
+final_time = 0.8  # final time in seconds
 frequency_peak = 7.0  # The dominant frequency of the Ricker wavelet in Hz.
 
 V = FunctionSpace(mesh, "KMV", 3)
@@ -38,6 +38,8 @@ d_s.interpolate(1.0)
 source_cofunction = assemble(d_s * TestFunction(V_s) * dx)
 q_s = Cofunction(V.dual()).interpolate(source_cofunction)
 
+# Quadrature rule for lumped mass matrix.
+quad_rule = finat.quadrature.make_quadrature(V.finat_element.cell, V.ufl_element().degree(), "KMV")
 
 def wave_equation_solver(c, source_function, dt, V):
     u = TrialFunction(V)
@@ -45,8 +47,6 @@ def wave_equation_solver(c, source_function, dt, V):
     u_np1 = Function(V) # timestep n+1
     u_n = Function(V) # timestep n
     u_nm1 = Function(V) # timestep n-1
-    # Quadrature rule for lumped mass matrix.
-    quad_rule = finat.quadrature.make_quadrature(V.finat_element.cell, V.ufl_element().degree(), "KMV")
     m = (1 / (c * c))
     time_term =  m * (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
     nf = (1 / c) * ((u_n - u_nm1) / dt) * v * ds
@@ -96,27 +96,95 @@ for step in tape.timestepper(iter(range(total_steps))):
     misfit = guess_receiver - true_data_receivers[step]
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
 
-# We now instantiate :class:`~.EnsembleReducedFunctional`::
-# get_working_tape().progress_bar = ProgressBar
-J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble)
+# Water closer to the source is less important for the inversion.
+water = np.where(c_true.dat.data_ro < 1.51)
+
+
+# def zero_grad_for_water(functional, grad, values):
+#     for g in grad:
+#         g.dat.data_wo_with_halos[water] = 0.0
+#     return grad
+
+
+def regularise_gradient(functional, dJ, controls, gamma=1.0e-6):
+    """Tikhonov regularization"""
+    for i0, g in enumerate(dJ):
+        # m_u = TrialFunction(V)
+        # m_v = TestFunction(V)
+        # G = m_u * m_v * dx(scheme=quad_rule) - dot(grad(controls[i0]), grad(m_v)) * dx(scheme=quad_rule)
+        # gradreg = Function(V)
+        # grad_prob = LinearVariationalProblem(lhs(G), rhs(G), gradreg)
+        # grad_solver = LinearVariationalSolver(
+        #     grad_prob,
+        #     solver_parameters={
+        #         "ksp_type": "preonly",
+        #         "pc_type": "jacobi",
+        #         "mat_type": "matfree",
+        #     },
+        # )
+        # grad_solver.solve()
+        # g += gamma * gradreg
+        g.dat.data_wo_with_halos[water] = 0.0
+    return dJ
+
+
+def regularise_functional(func_value, controls):
+    func_value *= 100
+    return func_value
+
+
+J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble,
+                                #   eval_cb_post=regularise_functional,
+                                  derivative_cb_post=regularise_gradient)
 
 
 lb = 1.5
 up = 2.0
 
+# problem = MinimizationProblem(J_hat, bounds=(lb, up))
+# # BQNLS
+# # blmvm
+# # bnls
+# # BNTR
+# solver = TAOSolver(problem, {"tao_type": "blmvm", "tao_max_it": 15}, comm=my_ensemble.comm,
+#                    convert_options={"riesz_representation": "L2"})
+# outfile = VTKFile("c_optimised_circle.pvd")
+
+
+# def convergence_tracker(tao, *, gatol=1.0e-7, max_its=15):
+#     its, _, res, _, _, _ = tao.getSolutionStatus()
+#     outfile.write(J_hat.controls[0].control)
+#     if res < gatol or its >= max_its:
+#         tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONVERGED_USER)
+#     else:
+#         tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONTINUE_ITERATING)
+
+
+# solver.tao.setConvergenceTest(convergence_tracker)
+# c_optimised = solver.solve()
+
 problem = MinimizationProblem(J_hat, bounds=(lb, up))
-solver = TAOSolver(problem, {"tao_type": "blmvm", "tao_max_it": 20}, comm=my_ensemble.comm)
-outfile = VTKFile("c_optimised_circle.pvd")
+params = {
+    'General': {
+        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 2}},
+    'Step': {
+        'Type': 'Augmented Lagrangian',
+        'Line Search': {
+            'Descent Method': {
+                'Type': 'Quasi-Newton Step'
+            }
+        },
+        'Augmented Lagrangian': {
+            'Subproblem Step Type': 'Line Search',
+            'Subproblem Iteration Limit': 10
+        }
+    },
+    'Status Test': {
+        'Gradient Tolerance': 1e-7,
+        'Iteration Limit': 3
+    }
+}
 
-
-def convergence_tracker(tao, *, gatol=1.0e-7, max_its=20):
-    its, _, res, _, _, _ = tao.getSolutionStatus()
-    outfile.write(J_hat.controls[0].control)
-    if res < gatol or its >= max_its:
-        tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONVERGED_USER)
-    else:
-        tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONTINUE_ITERATING)
-
-
-solver.tao.setConvergenceTest(convergence_tracker)
-c_optimised = solver.solve()
+solver = ROLSolver(problem, params, inner_product="L2")
+rho_opt = solver.solve()
+VTKFile("c_optimised_circle.pvd").write(rho_opt)
