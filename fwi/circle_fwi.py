@@ -11,18 +11,27 @@ M = 1
 my_ensemble = Ensemble(COMM_WORLD, M)
 num_sources = my_ensemble.ensemble_comm.size
 source_number = my_ensemble.ensemble_comm.rank
-mesh = UnitSquareMesh(20, 20, comm=my_ensemble.comm)
+mesh = UnitSquareMesh(25, 25, comm=my_ensemble.comm)
 
 source_locations = np.linspace((0.3, 0.1), (0.7, 0.1), num_sources)
-receiver_locations = np.linspace((0.2, 0.9), (0.8, 0.9), 20)
+receiver_locations = np.linspace((0.2, 0.15), (0.8, 0.15), 20)
+# mesh = Mesh(
+#     '/Users/ddolci/work/firedrake_new/spyro_meshes/square.msh',
+#     comm=my_ensemble.comm,
+#     distribution_parameters={
+#                 "overlap_type": (DistributedMeshOverlapType.NONE, 0)
+#             }, name="mesh"
+# )
+# source_locations = np.linspace((-0.1, 0.2), (-0.1, 0.8), num_sources)
+# receiver_locations = np.linspace((-0.8, 0.2), (-0.8, 0.8), 20)
 dt = 0.001  # time step in seconds
-final_time = 0.8  # final time in seconds
+final_time = 1.0  # final time in seconds
 frequency_peak = 7.0  # The dominant frequency of the Ricker wavelet in Hz.
 
 V = FunctionSpace(mesh, "KMV", 3)
 x, z = SpatialCoordinate(mesh)
 c_true = Function(V).interpolate(1.75 + 0.25 * tanh(200 * (0.125 - sqrt((x - 0.5) ** 2 + (z - 0.5) ** 2))))
-
+VTKFile("outputs/true_model.pvd").write(c_true)
 
 def ricker_wavelet(t, fs, amp=1.0):
     ts = 1.5
@@ -37,7 +46,8 @@ d_s = Function(V_s)
 d_s.interpolate(1.0)
 source_cofunction = assemble(d_s * TestFunction(V_s) * dx)
 q_s = Cofunction(V.dual()).interpolate(source_cofunction)
-
+# q_s = q_s.riesz_representation()
+VTKFile("outputs/source.pvd").write(q_s)
 # Quadrature rule for lumped mass matrix.
 quad_rule = finat.quadrature.make_quadrature(V.finat_element.cell, V.ufl_element().degree(), "KMV")
 
@@ -47,16 +57,15 @@ def wave_equation_solver(c, source_function, dt, V):
     u_np1 = Function(V) # timestep n+1
     u_n = Function(V) # timestep n
     u_nm1 = Function(V) # timestep n-1
-    m = (1 / (c * c))
-    time_term =  m * (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
-    nf = (1 / c) * ((u_n - u_nm1) / dt) * v * ds
-    a = dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
+    time_term = (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
+    nf = ((u_n - u_nm1) / dt) * v * ds
+    a = c * c * dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
     F = time_term + a + nf
-    lin_var = LinearVariationalProblem(lhs(F), rhs(F) + source_function, u_np1)
+    lin_var = LinearVariationalProblem(lhs(F), rhs(F) + source_function, u_np1, constant_jacobian=True)
     # Since the linear system matrix is diagonal, the solver parameters are set to construct a solver,
     # which applies a single step of Jacobi preconditioning.
     solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
-    solver = LinearVariationalSolver(lin_var,solver_parameters=solver_parameters)
+    solver = LinearVariationalSolver(lin_var, solver_parameters=solver_parameters)
     return solver, u_np1, u_n, u_nm1
 
 
@@ -76,6 +85,7 @@ for step in range(total_steps):
     u_n.assign(u_np1)
     true_data_receivers.append(assemble(interpolate_receivers))
 
+VTKFile("outputs/true_data.pvd").write(u_np1)
 
 c_guess = Function(V).interpolate(1.5)
 
@@ -95,36 +105,41 @@ for step in tape.timestepper(iter(range(total_steps))):
     guess_receiver = assemble(interpolate_receivers)
     misfit = guess_receiver - true_data_receivers[step]
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
+    if J_val > 1e10:
+        raise ValueError("The simulation has diverged.")
+        break
 
 # Water closer to the source is less important for the inversion.
 water = np.where(c_true.dat.data_ro < 1.51)
-
-
-# def zero_grad_for_water(functional, grad, values):
-#     for g in grad:
-#         g.dat.data_wo_with_halos[water] = 0.0
-#     return grad
+outfile = VTKFile("outputs/c_optimised_circleL2.pvd")
+c_computed = Function(V, name="c_optimised")
 
 
 def regularise_gradient(functional, dJ, controls, gamma=1.0e-6):
     """Tikhonov regularization"""
-    for i0, g in enumerate(dJ):
-        # m_u = TrialFunction(V)
-        # m_v = TestFunction(V)
-        # G = m_u * m_v * dx(scheme=quad_rule) - dot(grad(controls[i0]), grad(m_v)) * dx(scheme=quad_rule)
-        # gradreg = Function(V)
-        # grad_prob = LinearVariationalProblem(lhs(G), rhs(G), gradreg)
-        # grad_solver = LinearVariationalSolver(
-        #     grad_prob,
-        #     solver_parameters={
-        #         "ksp_type": "preonly",
-        #         "pc_type": "jacobi",
-        #         "mat_type": "matfree",
-        #     },
-        # )
-        # grad_solver.solve()
-        # g += gamma * gradreg
-        g.dat.data_wo_with_halos[water] = 0.0
+    c_computed.assign(controls[0])
+    # Check if dJ is a NaN
+    if np.isnan(dJ[0].dat.data_ro).any():
+        raise ValueError("The gradient is NaN")
+    print("The gradient is not NaN", flush=True)
+    outfile.write(c_computed)
+    # for i0, g in enumerate(dJ):
+    #     m_u = TrialFunction(V)
+    #     m_v = TestFunction(V)
+    #     G = m_u * m_v * dx(scheme=quad_rule) - dot(grad(controls[i0]), grad(m_v)) * dx(scheme=quad_rule)
+    #     gradreg = Function(V)
+    #     grad_prob = LinearVariationalProblem(lhs(G), rhs(G), gradreg)
+    #     grad_solver = LinearVariationalSolver(
+    #         grad_prob,
+    #         solver_parameters={
+    #             "ksp_type": "preonly",
+    #             "pc_type": "jacobi",
+    #             "mat_type": "matfree",
+    #         },
+    #     )
+    #     grad_solver.solve()
+    #     g += gamma * gradreg
+    #     g.dat.data_wo_with_halos[water] = 0.0
     return dJ
 
 
@@ -166,7 +181,7 @@ up = 2.0
 problem = MinimizationProblem(J_hat, bounds=(lb, up))
 params = {
     'General': {
-        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 2}},
+        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 10}},
     'Step': {
         'Type': 'Augmented Lagrangian',
         'Line Search': {
@@ -181,10 +196,13 @@ params = {
     },
     'Status Test': {
         'Gradient Tolerance': 1e-7,
-        'Iteration Limit': 3
+        'Iteration Limit': 10
     }
 }
-
-solver = ROLSolver(problem, params, inner_product="L2")
+solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
+solver = ROLSolver(problem, params, inner_product="L2",
+                   inner_product_solver_opts={
+                       "solver_options": {"solver_parameters" : solver_parameters},
+                       "measure_options": {"scheme": quad_rule}})
 rho_opt = solver.solve()
-VTKFile("c_optimised_circle.pvd").write(rho_opt)
+# {'solver_parameters': {'mat_type': 'matfree', 'ksp_type': 'preonly', 'pc_type': 'jacobi'}}
