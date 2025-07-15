@@ -1,93 +1,101 @@
-from tools import model, model_interpolate
+# /from tools import model_interpolate
+from tools import model_elastic as model
+from tools import read_segy, parameter_interpolate
 from firedrake import *
 import finat
+import FIAT
 from firedrake.__future__ import interpolate
 import numpy as np
+import time
+from mpi4py import MPI
 import scipy.ndimage
 # read a hdf5 file
 M = 1
-my_ensemble = Ensemble(COMM_WORLD, M)
+my_ensemble = Ensemble(MPI.COMM_WORLD, M)
 num_sources = my_ensemble.ensemble_comm.size
 source_number = my_ensemble.ensemble_comm.rank
-
 mesh = Mesh(
-    model["path"] + 'inputs/marmousi.msh', comm=my_ensemble.comm,
+    model["mesh"]["meshfile"], comm=my_ensemble.comm,
     distribution_parameters={
                 "overlap_type": (DistributedMeshOverlapType.NONE, 0)
             }, name="mesh"
 )
-V = FunctionSpace(mesh, "KMV", 4)
-c_true = model_interpolate(model, mesh, V, guess=False, name="c_true")
-VTKFile(model["path"] + "outputs/true_model.pvd").write(c_true)
-c_guess = Function(V, name="c_guess")
-# Apply gaussian smoothing to the true data to create a guess model.
+mesh.coordinates.dat.data[:] *= 1000
 
-smoothing_true_data = scipy.ndimage.gaussian_filter(c_true.dat.data_ro, sigma=5)
-c_guess.dat.data[:] = smoothing_true_data
-VTKFile(model["path"] + "outputs/guess_model.pvd").write(c_guess)
-
-with CheckpointFile(model["path"] + "outputs/vel_models.h5", 'w') as afile:
-    afile.save_mesh(mesh)  # optional
-    afile.save_function(c_true)
-    afile.save_function(c_guess)
-source_locations = model["acquisition"]["source_pos"]
-receiver_locations = model["acquisition"]["receiver_locations"]
+dt = model["timeaxis"]["dt"]  # time step in seconds
+final_time = model["timeaxis"]["tf"]  # final time in seconds
+# The dominant frequency of the Ricker wavelet in KHz.
 frequency_peak = model["acquisition"]["frequency"]
-final_time = model["timeaxis"]["tf"]
-dt = model["timeaxis"]["dt"]
+
+
+degree = 4
+element = FiniteElement('KMV', mesh.ufl_cell(), degree=degree)
+V = VectorFunctionSpace(mesh, element)
+quad_rule = finat.quadrature.make_quadrature(
+    V.finat_element.cell, V.ufl_element().degree(), "KMV")
+
+V = FunctionSpace(mesh, element)
+print("DOFs", V.dim())
+vp = read_segy(model["mesh"]["vp"])
+vp_true = parameter_interpolate(model, V, vp.T, l_grid=1.25, name="vp_true")
+vp_guess = parameter_interpolate(
+    model, V, vp.T, l_grid=1.25, name="vp_true", smoth_par=True)
+VTKFile("outputs/vp_true.pvd").write(vp_true)
+VTKFile("outputs/vp_guess.pvd").write(vp_guess)
+
+source_locations = model["acquisition"]["source_pos"][source_number]
+receiver_locations = model["acquisition"]["receiver_locations"]
+
 
 def ricker_wavelet(t, fs, amp=1.0):
-    ts = 1.5
-    t0 = t - ts * np.sqrt(6.0) / (np.pi * fs)
+    ts = 0.0
+    t0 = t- ts * np.sqrt(6.0) / (np.pi * fs)
     return (amp * (1.0 - (1.0 / 2.0) * (2.0 * np.pi * fs) * (2.0 * np.pi * fs) * t0 * t0)
             * np.exp((-1.0 / 4.0) * (2.0 * np.pi * fs) * (2.0 * np.pi * fs) * t0 * t0))
 
-
-source_mesh = VertexOnlyMesh(mesh, [source_locations[source_number]])
-
+source_mesh = VertexOnlyMesh(mesh, [source_locations])
 V_s = FunctionSpace(source_mesh, "DG", 0)
-
 d_s = Function(V_s)
-d_s.assign(1.0)
+d_s.assign(1.0 * 0.0714 * 0.0714 * 1000.)
 
 source_cofunction = assemble(d_s * TestFunction(V_s) * dx)
 q_s = Cofunction(V.dual()).interpolate(source_cofunction)
 
+q_s = q_s.riesz_representation("L2")
+VTKFile("outputs/source.pvd").write(q_s)
+def sh_wave_equation(vp, dt, V, f, quad_rule):
 
-
-def wave_equation_solver(c, source_function, dt, V):
     u = TrialFunction(V)
     v = TestFunction(V)
     u_np1 = Function(V, name="u_np1") # timestep n+1
     u_n = Function(V, name="u_n") # timestep n
     u_nm1 = Function(V, name="u_nm1") # timestep n-1
-    # Quadrature rule for lumped mass matrix.
-    quad_rule = finat.quadrature.make_quadrature(V.finat_element.cell, V.ufl_element().degree(), "KMV")
-    time_term = (1 / (c * c)) * (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
-    nf = (1 / c) * ((u_n - u_nm1) / dt) * v * ds
-    a = dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
-    F = time_term + a + nf + source_function * v * dx
+    time_term = (u - 2.0 * u_n + u_nm1) / Constant(dt**2) * v * dx(scheme=quad_rule)
+    a = vp*vp * dot(grad(u_n), grad(v)) * dx(scheme=quad_rule)
+    F = time_term + a - f * v * dx(scheme=quad_rule)
     lin_var = LinearVariationalProblem(lhs(F), rhs(F), u_np1, constant_jacobian=True)
     solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
-    solver = LinearVariationalSolver(lin_var,solver_parameters=solver_parameters)
+    solver = LinearVariationalSolver(lin_var, solver_parameters=solver_parameters)
     return solver, u_np1, u_n, u_nm1
+
 
 receiver_mesh = VertexOnlyMesh(mesh, receiver_locations)
 V_r = FunctionSpace(receiver_mesh, "DG", 0)
-
+print("Running the true data")
 true_data_receivers = []
 total_steps = int(final_time / dt) + 1
 f = Function(V)  # Wave equation forcing term.
-solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_true, f, dt, V)
+solver, u_np1, u_n, u_nm1 = sh_wave_equation(vp_true, dt, V, f, quad_rule)
 interpolate_receivers = interpolate(u_np1, V_r)
-output_file = VTKFile(model["path"] + "outputs/true_data_3.pvd")
+output_file = VTKFile("outputs/true_data_2D.pvd")
+start = time.perf_counter()
 for step in range(total_steps):
-    f.assign(q_s.riesz_representation(riesz_map="l2"))
+    f.assign(ricker_wavelet(step * dt, frequency_peak)*q_s)
     solver.solve()
     u_nm1.assign(u_n)
     u_n.assign(u_np1)
     true_data_receivers.append(assemble(interpolate_receivers))
-    if step % model["timeaxis"]["fspool"] == 0:
+    if step % 100 == 0:
         print("Writing step %d" % step, flush=True)
         output_file.write(u_np1)
     if norm(u_np1) > 1e10:
@@ -98,79 +106,68 @@ for step in range(total_steps):
 from firedrake.adjoint import *
 continue_annotation()
 tape = get_working_tape()
-from checkpoint_schedules import Revolve, MixedCheckpointSchedule, StorageType
-# tape.enable_checkpointing(MixedCheckpointSchedule(total_steps, 10, storage=StorageType.RAM))
-# tape.progress_bar = ProgressBar
+from checkpoint_schedules import *
+
+# tape.enable_checkpointing(
+#     # SingleMemoryStorageSchedule(),
+#     # Revolve(total_steps, 50),
+#     MixedCheckpointSchedule(total_steps, 50, storage=StorageType.RAM),
+#     gc_timestep_frequency=100)
+# store data in a numpy array
 f = Function(V)  # Wave equation forcing term.
-solver, u_np1, u_n, u_nm1 = wave_equation_solver(c_guess, f, dt, V)
+solver, u_np1, u_n, u_nm1 = sh_wave_equation(vp_guess, dt, V, f, quad_rule)
 interpolate_receivers = interpolate(u_np1, V_r)
 J_val = 0.0
-misfit_data = []
-output_file1 = VTKFile(model["path"] + "outputs/guess_data_3.pvd")
+misfit = Function(V_r, name="misfit")
 for step in tape.timestepper(iter(range(total_steps))):
-    f.assign(q_s.riesz_representation(riesz_map="l2"))
-    solver.solve()
     u_nm1.assign(u_n)
     u_n.assign(u_np1)
-    guess_receiver = assemble(interpolate_receivers)
-    misfit = guess_receiver - true_data_receivers[step]
-    misfit_data.append(guess_receiver.dat.data_ro - true_data_receivers[step].dat.data_ro)
+    f.assign(ricker_wavelet(step * dt, frequency_peak) * q_s)
+    solver.solve()
+    misfit = misfit.assign(
+        assemble(interpolate_receivers) - true_data_receivers[step])
     J_val += 0.5 * assemble(inner(misfit, misfit) * dx)
+
     if step % model["timeaxis"]["fspool"] == 0:
-        print("Writing step %d" % step, flush=True)
-        output_file1.write(u_np1)
+        print("Step %d, J = %e" % (step, J_val), flush=True)
     if J_val > 1e10:
         raise ValueError("The simulation has diverged.")
         break
 
-# with CheckpointFile(model["path"] + "outputs/unp1.h5", 'w') as afile:
-#     afile.save_function(u_np1)
-# save the misfit data
-np.save(model["path"] + "outputs/misfit_data_3.npy", misfit_data)
-outfile = VTKFile("c_optimised_marmousi.pvd")
-water = np.where(c_true.dat.data_ro < 1.51)
+
+if COMM_WORLD.rank == 0:
+    print("J = %e" % J_val, flush=True)
+
+outfile = VTKFile("outputs/test.pvd")
+water = np.where(vp_true.dat.data_ro < 1.51)
+c_computed = Function(V, name="test")
 
 
-def regularise_gradient(functional, dJ, controls, gamma=1.0e-6):
-    outfile.write(controls[0].control)
+def regularise_gradient(functional, dJ, controls, regularise=True, gamma=1*1e-4):
     """Tikhonov regularization"""
+    print("Regularising gradient", flush=True)
+    c_computed.assign(controls[0])
+    np.save("outputs/control.npy", c_computed.dat.data_ro)
+    outfile.write(c_computed)
+    if not regularise:
+        return dJ
+
     for i0, g in enumerate(dJ):
-        m_u = TrialFunction(V)
-        m_v = TestFunction(V)
-        G = m_u * m_v * dx(scheme=quad_rule) - dot(grad(controls[i0]), grad(m_v)) * dx(scheme=quad_rule)
-        gradreg = Function(V)
-        grad_prob = LinearVariationalProblem(lhs(G), rhs(G), gradreg)
-        grad_solver = LinearVariationalSolver(
-            grad_prob,
-            solver_parameters={
-                "ksp_type": "preonly",
-                "pc_type": "jacobi",
-                "mat_type": "matfree",
-            },
-        )
-        grad_solver.solve()
-        g += gamma * gradreg
         g.dat.data_wo_with_halos[water] = 0.0
     return dJ
 
 
-def regularise_functional(func_value, controls):
-    func_value *= 100
-    return func_value
+J_hat = EnsembleReducedFunctional(
+    J_val, Control(vp_guess), my_ensemble, derivative_cb_post=regularise_gradient)
 
+lb = 1.
+up = 5.0
 
-J_hat = EnsembleReducedFunctional(J_val, Control(c_guess), my_ensemble,
-                                #   eval_cb_post=regularise_functional,
-                                  derivative_cb_post=regularise_gradient)
-
-lb = 1.5
-up = 4.5
-
-# taylor_test(J_hat, c_guess, Function(V).assign(0.1))
+# taylor_test(J_hat, vp_guess, Function(V).assign(0.1))
 # c_optimised = minimize(
 #     J_hat, method="L-BFGS-B", options={"disp": True, "maxiter": 10},
-#     bounds=(1.5, 4.5), derivative_options={"riesz_representation": 'l2'}
-# )
+#     bounds=(lb, up), derivative_options={"riesz_representation": 'L2'}
+# # )
 # problem = MinimizationProblem(J_hat, bounds=(lb, up))
 # # BQNLS
 # # blmvm
@@ -178,12 +175,11 @@ up = 4.5
 # # BNTR
 # solver = TAOSolver(problem, {"tao_type": "blmvm", "tao_max_it": 15}, comm=my_ensemble.comm,
 #                    convert_options={"riesz_representation": "L2"})
-# outfile = VTKFile("c_optimised_circle.pvd")
 
 
 # def convergence_tracker(tao, *, gatol=1.0e-7, max_its=15):
 #     its, _, res, _, _, _ = tao.getSolutionStatus()
-#     outfile.write(J_hat.controls[0].control)
+#     # outfile.write(J_hat.controls[0].control)
 #     if res < gatol or its >= max_its:
 #         tao.setConvergedReason(PETSc.TAO.ConvergedReason.CONVERGED_USER)
 #     else:
@@ -196,7 +192,7 @@ up = 4.5
 problem = MinimizationProblem(J_hat, bounds=(lb, up))
 params = {
     'General': {
-        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 2}},
+        'Secant': {'Type': 'Limited-Memory BFGS', 'Maximum Storage': 10}},
     'Step': {
         'Type': 'Augmented Lagrangian',
         'Line Search': {
@@ -211,9 +207,14 @@ params = {
     },
     'Status Test': {
         'Gradient Tolerance': 1e-7,
-        'Iteration Limit': 3
+        'Iteration Limit': 15
     }
 }
 
+
+solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
 solver = ROLSolver(problem, params, inner_product="L2")
+                #    inner_product_solver_opts={
+                #        "solver_options": {"solver_parameters": solver_parameters},
+                #        "measure_options": {"scheme": quad_rule}})
 rho_opt = solver.solve()
