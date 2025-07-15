@@ -108,11 +108,11 @@ continue_annotation()
 tape = get_working_tape()
 from checkpoint_schedules import *
 
-# tape.enable_checkpointing(
-#     # SingleMemoryStorageSchedule(),
-#     # Revolve(total_steps, 50),
-#     MixedCheckpointSchedule(total_steps, 50, storage=StorageType.RAM),
-#     gc_timestep_frequency=100)
+tape.enable_checkpointing(
+    # SingleMemoryStorageSchedule(),
+    # Revolve(total_steps, 50),
+    MixedCheckpointSchedule(total_steps, 50, storage=StorageType.RAM),
+    gc_timestep_frequency=100)
 # store data in a numpy array
 f = Function(V)  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = sh_wave_equation(vp_guess, dt, V, f, quad_rule)
