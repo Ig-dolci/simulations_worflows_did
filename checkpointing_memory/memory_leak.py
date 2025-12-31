@@ -4,7 +4,8 @@ from firedrake.adjoint import *
 from firedrake.__future__ import Interpolator, interpolate
 import gc
 import numpy as np
-from checkpoint_schedules import Revolve, SingleMemoryStorageSchedule
+from checkpoint_schedules import Revolve, SingleMemoryStorageSchedule, MixedCheckpointSchedule,\
+    NoneCheckpointSchedule, StorageType
 from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("--annotate", type=str, default="False")
@@ -20,7 +21,10 @@ tape = get_working_tape()
 total_steps = 1000
 if args.checkpointing == "True" and args.schedule == "revolve":
     steps = args.n_checkpoints
-    tape.enable_checkpointing(Revolve(total_steps, steps))
+    tape.enable_checkpointing(
+        MixedCheckpointSchedule(total_steps, steps, storage=StorageType.RAM),
+    gc_collect_opts={"timestep_frequency": 100})
+    # tape.enable_checkpointing(Revolve(total_steps, steps), 
 elif args.checkpointing == "True" and args.schedule == "single":
     print("single")
     tape.enable_checkpointing(SingleMemoryStorageSchedule())
@@ -28,7 +32,7 @@ elif args.checkpointing == "True" and args.schedule == "single":
 num_sources = 1
 source_number = 0
 Lx, Lz = 1.0, 1.0
-mesh = UnitSquareMesh(400, 400)
+mesh = UnitSquareMesh(200, 200)
 V = FunctionSpace(mesh, "CG", 1)
 
 
@@ -122,7 +126,9 @@ def test_memory_burger():
             u_.assign(u)
     J = assemble(u*u*dx)
     J_hat = ReducedFunctional(J, Control(ic))
-    J_hat(ic)
+    for _ in range(5):
+        J_hat(ic)
+        J_hat.derivative()
 
 
 if args.function == "interpolate":
@@ -134,4 +140,4 @@ elif args.function == "assign":
 elif args.function == "burger":
     test_memory_burger()
 # # tape.visualise()
-# print("done")
+print("done")
