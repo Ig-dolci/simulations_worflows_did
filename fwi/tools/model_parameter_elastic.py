@@ -38,7 +38,7 @@ model["acquisition"] = {
 model["timeaxis"] = {
     "t0": 0.0,  # Initial time for event
     "tf": 4.0 * 1000,  # Final time for event
-    "dt": 0.001 * 1000,  # Time step,
+    "dt": 0.0002 * 1000,  # Time step,
     "amplitude": 1,  # the Ricker has an amplitude of 1.
     "nspool": 500,  # how frequently to output solution to pvds
     "fspool": 500,  # how frequently to save solution to RAM

@@ -8,7 +8,7 @@ model["mesh"] = {
     "xmax": 13.0,
     "zmax": 0.0,
     "zmin": -3.5,
-    "meshfile": path1 + "mm_acoustic.msh",
+    "meshfile": path1 + "mm_acoustic_7.msh",
     "vs": path + "MODEL_S-WAVE_VELOCITY_1.25m.segy",
     "vp": path + "MODEL_P-WAVE_VELOCITY_1.25m.segy",
     "density": path + "MODEL_DENSITY_1.25m.segy",

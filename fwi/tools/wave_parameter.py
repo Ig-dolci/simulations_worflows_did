@@ -72,7 +72,8 @@ def parameter_interpolate(
     if sd == 2:
         qp_x, qp_z = coords.dat.data[:, 0], coords.dat.data[:, 1]
     elif sd == 3:
-        qp_z, qp_x, qp_y = (
+        # BoxMesh coordinates are (x, y, z)
+        qp_x, qp_y, qp_z = (
             coords.dat.data[:, 0],
             coords.dat.data[:, 1],
             coords.dat.data[:, 2],
@@ -81,18 +82,23 @@ def parameter_interpolate(
         raise NotImplementedError("Only 2D and 3D models are supported")
 
     # This enable the user cut the model to the desired region.
-    if zmin < 0.0:
-        Z0 = parameter[
-            int(model["mesh"]["xmin"]/l_grid):int(model["mesh"]["xmax"]/l_grid),
-            -int(model["mesh"]["zmax"]/l_grid):-int(model["mesh"]["zmin"]/l_grid)
-        ]
-    if xmin < 0.0:
-        Z0 = parameter[
-            -int(model["mesh"]["xmax"]/l_grid):-int(model["mesh"]["xmin"]/l_grid),
-            int(model["mesh"]["zmin"]/l_grid):int(model["mesh"]["zmax"]/l_grid)
-        ]
-    Z = np.zeros((int((xmax - xmin)/l_grid), int((zmax - zmin)/l_grid)))
-    if model["BCs"]["status"]:
+    if sd == 2:
+        if zmin < 0.0:
+            Z0 = parameter[
+                int(model["mesh"]["xmin"]/l_grid):int(model["mesh"]["xmax"]/l_grid),
+                -int(model["mesh"]["zmax"]/l_grid):-int(model["mesh"]["zmin"]/l_grid)
+            ]
+        if xmin < 0.0:
+            Z0 = parameter[
+                -int(model["mesh"]["xmax"]/l_grid):-int(model["mesh"]["xmin"]/l_grid),
+                int(model["mesh"]["zmin"]/l_grid):int(model["mesh"]["zmax"]/l_grid)
+            ]
+        Z = np.zeros((int((xmax - xmin)/l_grid), int((zmax - zmin)/l_grid)))
+    elif sd == 3:
+        # For 3D, use the parameter directly
+        Z = parameter
+    
+    if model["BCs"]["status"] and sd == 2:
         if zmin < 0.0:
             # The depth is in z-direction
             Z[
@@ -119,35 +125,40 @@ def parameter_interpolate(
 
         if smoth_par:
             Z = scipy.ndimage.gaussian_filter(Z, sigma=kwargs.get("sigma", 50))
-        if sd == 2:
-            nrow, ncol = Z.shape
-            if zmin < 0.0:
-                z = np.linspace(zmax, zmin, ncol)
-            else:
-                z = np.linspace(zmin, zmax, ncol)
-            if xmin < 0.0:
-                x = np.linspace(xmax, xmin, nrow)
-            else:
-                x = np.linspace(xmin, xmax, nrow)
+    
+    # Interpolation (outside BCs block to handle both with and without BCs)
+    if sd == 2:
+        nrow, ncol = Z.shape
+        if zmin < 0.0:
+            z = np.linspace(zmax, zmin, ncol)
+        else:
+            z = np.linspace(zmin, zmax, ncol)
+        if xmin < 0.0:
+            x = np.linspace(xmax, xmin, nrow)
+        else:
+            x = np.linspace(xmin, xmax, nrow)
 
-            # make sure no out-of-bounds
-            qp_z2 = [zmin if z < zmin else zmax if z > zmax else z for z in qp_z]
-            qp_x2 = [xmin if x < xmin else xmax if x > xmax else x for x in qp_x]
-            interpolant = RegularGridInterpolator((x, z), Z)
-            tmp = interpolant((qp_x2, qp_z2))
-        elif sd == 3:
-            nrow, ncol, ncol2 = Z.shape
-            z = np.linspace(zmin, zmax, nrow)
-            x = np.linspace(xmin, xmax, ncol)
-            y = np.linspace(ymin, ymax, ncol2)
+        # make sure no out-of-bounds
+        qp_z2 = [zmin if z < zmin else zmax if z > zmax else z for z in qp_z]
+        qp_x2 = [xmin if x < xmin else xmax if x > xmax else x for x in qp_x]
+        interpolant = RegularGridInterpolator((x, z), Z)
+        tmp = interpolant((qp_x2, qp_z2))
+    elif sd == 3:
+        # Z shape is (nz, ny, nx) from SEP format
+        nz, ny, nx = Z.shape
+        # Create coordinate arrays matching the data layout
+        z = np.linspace(zmin, zmax, nz)
+        x = np.linspace(xmin, xmax, nx)
+        y = np.linspace(ymin, ymax, ny)
 
-            # make sure no out-of-bounds
-            qp_z2 = [zmin if z < zmin else zmax if z > zmax else z for z in qp_z]
-            qp_x2 = [xmin if x < xmin else xmax if x > xmax else x for x in qp_x]
-            qp_y2 = [ymin if y < ymin else ymax if y > ymax else y for y in qp_y]
+        # make sure no out-of-bounds
+        qp_z2 = [zmin if z < zmin else zmax if z > zmax else z for z in qp_z]
+        qp_x2 = [xmin if x < xmin else xmax if x > xmax else x for x in qp_x]
+        qp_y2 = [ymin if y < ymin else ymax if y > ymax else y for y in qp_y]
 
-            interpolant = RegularGridInterpolator((z, x, y), Z)
-            tmp = interpolant((qp_z2, qp_x2, qp_y2))
+        # RegularGridInterpolator expects (z, y, x) to match Z.shape (nz, ny, nx)
+        interpolant = RegularGridInterpolator((z, y, x), Z)
+        tmp = interpolant((qp_z2, qp_y2, qp_x2))
 
     c = fire.Function(function_space, name=name)
     c.dat.data[:] = tmp
@@ -165,7 +176,51 @@ def _check_units(c):
     return c
 
 
-def read_segy(input_filename, save_figure=False):
+def read_raw_binary_3d(filename, nx, ny, nz, dtype='<f4'):
+    """Read raw binary file with known dimensions (e.g., EAGE Salt model).
+    
+    Parameters
+    ----------
+    filename : str
+        Path to binary file
+    nx, ny, nz : int
+        Dimensions of the 3D array
+    dtype : str
+        Data type (default '<f4' = little-endian float32)
+    
+    Returns
+    -------
+    vp : numpy.ndarray
+        3D array of shape (nx, ny, nz)
+    """
+    print(f"Reading raw binary file: {filename}")
+    print(f"Dimensions: nx={nx}, ny={ny}, nz={nz}")
+    data = np.fromfile(filename, dtype=dtype)
+    expected_size = nx * ny * nz
+    print(f"Read {len(data)} values, expected {expected_size}")
+    
+    if len(data) != expected_size:
+        print(f"WARNING: Size mismatch! Trying to determine actual dimensions...")
+        # Check if it's a multiple of nx*ny
+        if len(data) % (nx * ny) == 0:
+            actual_nz = len(data) // (nx * ny)
+            print(f"Detected nz={actual_nz} instead of {nz}")
+            vp = data.reshape((actual_nz, ny, nx))
+        else:
+            raise ValueError(f"Cannot reshape: data size {len(data)} doesn't match expected {expected_size}")
+    else:
+        vp = data.reshape((nz, ny, nx))  # SEP format: n1=676, n2=676, n3=210
+
+    # Save figure
+
+    # plt.imshow(vp[:, :, int(ny/2)], cmap="jet", aspect="auto")
+    # plt.colorbar()
+    # plt.savefig("vp_model_3d_acoustic.png")
+    # plt.close()
+    return vp
+
+
+def read_segy(input_filename, dimension=2, save_figure=False, figure_name=None):
     """Reads a segy file and returns the data as a numpy array.
 
     Parameters
@@ -179,18 +234,56 @@ def read_segy(input_filename, save_figure=False):
         The data read from the segy file.
 
     """
-    f, filetype = os.path.splitext(input_filename)
+    fname_base, filetype = os.path.splitext(input_filename)
 
-    if filetype == ".segy":
-        with segyio.open(input_filename, ignore_geometry=True) as f:
-            nx, nz = len(f.samples), len(f.trace)
-            vp = np.zeros(shape=(nx, nz))
-            for index, trace in enumerate(f.trace):
-                vp[:, index] = trace
+    # Accept .segy files or files without extension (like Saltf@@)
+    if filetype == ".segy" or filetype == "":
+        with segyio.open(input_filename, ignore_geometry=True, strict=False) as f:
+            if dimension == 2:
+                nx, nz = len(f.samples), len(f.trace)
+                vp = np.zeros(shape=(nx, nz))
+                for index, trace in enumerate(f.trace):
+                    vp[:, index] = trace
+            elif dimension == 3:
+                print("Reading 3D segy file...")
+                sx = f.attributes(segyio.TraceField.SourceX)
+                sy = f.attributes(segyio.TraceField.SourceY)
+                
+                # Pre-compute unique values and create lookup dictionaries
+                # Convert to native Python types for reliable dictionary lookup
+                sx = [int(x) for x in sx]
+                sy = [int(y) for y in sy]
+                unique_sx = sorted(set(sx))
+                unique_sy = sorted(set(sy))
+                sx_to_index = {val: idx for idx, val in enumerate(unique_sx)}
+                sy_to_index = {val: idx for idx, val in enumerate(unique_sy)}
+                
+                nx, ny, nz = len(f.samples), len(unique_sx), len(unique_sy)
+                print(f"Dimensions of 3D model: nx={nx}, ny={ny}, nz={nz}")
+                vp = np.zeros(shape=(nx, ny, nz))
+                
+                total_traces = nx * ny
+                print_interval = max(1, total_traces // 20)  # Print progress 20 times
+                
+                for index, trace in enumerate(f.trace):
+                    if index % print_interval == 0:
+                        progress = (index + 1) / total_traces * 100
+                        print(f"Processing trace {index + 1}/{total_traces} ({progress:.1f}%)", end="\r")
+                    ix = sx_to_index[sx[index]]
+                    iy = sy_to_index[sy[index]]
+                    vp[:, ix, iy] = trace
+                print()  # New line after progress
+            else:
+                raise NotImplementedError("Only 2D and 3D models are supported")
+    else:
+        raise ValueError("Input file must be a .segy file")
 
-    if save_figure:
-        plt.imshow(vp, cmap="jet", aspect="auto")
-        plt.colorbar()
-        plt.savefig(f + ".png")
-        plt.close()
+    # if save_figure:
+    #     plt.imshow(vp, cmap="jet", aspect="auto")
+    #     plt.colorbar()
+    #     if figure_name:
+    #         plt.savefig(figure_name)
+    #     else:
+    #         plt.savefig(fname_base + ".png")
+    #     plt.close()
     return vp

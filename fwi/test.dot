@@ -1,0 +1,99 @@
+strict digraph "" {
+	node [label="\N"];
+	6032915920	[fillcolor=lightgrey,
+		label="assemble(BaseFormOperator)",
+		node_color=b,
+		position="(0, 0)",
+		shape=box,
+		style=filled];
+	6033299472	[label=w⃗₂,
+		node_color=r,
+		position="(0.0, -0.5)"];
+	6032915920 -> 6033299472;
+	6032916208	[fillcolor=lightgrey,
+		label="assign(w⃗₂ + w⃗₅)",
+		node_color=b,
+		position="(0, -3)",
+		shape=box,
+		style=filled];
+	6033299472 -> 6032916208;
+	6032877152	[label="&lt;Mesh #0&gt;",
+		node_color=r,
+		position="(0.0, -0.5)"];
+	6032916304	[fillcolor=lightgrey,
+		label="&lt;firedrake.adjoint_utils.blocks.mesh.MeshInputBlock object at 0x16796ff50&gt;",
+		node_color=b,
+		position="(0, -1)",
+		shape=box,
+		style=filled];
+	6032877152 -> 6032916304;
+	6033054432	[label=w⃗₅,
+		node_color=r,
+		position="(0.0, -1.5)"];
+	6032916304 -> 6033054432;
+	6032915536	[fillcolor=lightgrey,
+		label="&lt;firedrake.adjoint_utils.blocks.mesh.MeshOutputBlock object at 0x16796fc50&gt;",
+		node_color=b,
+		position="(0, -2)",
+		shape=box,
+		style=filled];
+	6033054432 -> 6032915536;
+	6033054432 -> 6032916208;
+	6032341072	[label="&lt;Mesh #0&gt;",
+		node_color=r,
+		position="(0.0, -2.5)"];
+	6032915536 -> 6032341072;
+	6032175616	[label=w⃗₅,
+		node_color=r,
+		position="(0.0, -3.5)"];
+	6032916208 -> 6032175616;
+	6032915728	[fillcolor=lightgrey,
+		label="&lt;firedrake.adjoint_utils.blocks.mesh.MeshOutputBlock object at 0x16796fd10&gt;",
+		node_color=b,
+		position="(0, -4)",
+		shape=box,
+		style=filled];
+	6032175616 -> 6032915728;
+	6033414352	[label="&lt;Mesh #0&gt;",
+		node_color=r,
+		position="(0.0, -4.5)"];
+	6032915728 -> 6033414352;
+	6033887824	[fillcolor=lightgrey,
+		label="assemble(BaseFormOperator)",
+		node_color=b,
+		position="(0, -6)",
+		shape=box,
+		style=filled];
+	6033414352 -> 6033887824;
+	6033895984	[fillcolor=lightgrey,
+		label="assemble(∬[rest of domain] w₁₉ 𝐝𝐱)",
+		node_color=b,
+		position="(0, -7)",
+		shape=box,
+		style=filled];
+	6033414352 -> 6033895984;
+	6031290064	[label=1.0,
+		node_color=r,
+		position="(0.0, -4.5)"];
+	6033573552	[fillcolor=lightgrey,
+		label="assign(1.0)",
+		node_color=b,
+		position="(0, -5)",
+		shape=box,
+		style=filled];
+	6031290064 -> 6033573552;
+	6032886432	[label=w₁₇,
+		node_color=r,
+		position="(0.0, -5.5)"];
+	6033573552 -> 6032886432;
+	6032886432 -> 6033887824;
+	6032894176	[label=w₁₉,
+		node_color=r,
+		position="(0.0, -6.5)"];
+	6033887824 -> 6032894176;
+	6032894176 -> 6033895984;
+	6036345296	[label=1.0,
+		node_color=r,
+		position="(0.0, -7.5)"];
+	6033895984 -> 6036345296;
+}

@@ -108,11 +108,11 @@ continue_annotation()
 tape = get_working_tape()
 from checkpoint_schedules import *
 
-tape.enable_checkpointing(
-    # SingleMemoryStorageSchedule(),
-    # Revolve(total_steps, 50),
-    MixedCheckpointSchedule(total_steps, 50, storage=StorageType.RAM),
-    gc_timestep_frequency=100)
+# tape.enable_checkpointing(
+#     # SingleMemoryStorageSchedule(),
+#     # Revolve(total_steps, 50),
+#     MixedCheckpointSchedule(total_steps, 50, storage=StorageType.RAM),
+#     gc_timestep_frequency=100)
 # store data in a numpy array
 f = Function(V)  # Wave equation forcing term.
 solver, u_np1, u_n, u_nm1 = sh_wave_equation(vp_guess, dt, V, f, quad_rule)
@@ -210,6 +210,33 @@ params = {
         'Iteration Limit': 15
     }
 }
+
+
+class SpyroFunctional(EnsembleReducedFunctional):
+    def __init__(self, J, vp, ensemble, source_locations, q_s):
+        super().__init__(J, [Control(vp), Control(q_s)], ensemble)
+        self.source_locations = source_locations
+
+    def __call__(self, c):
+        # Run ensemble reduced functional for a set of source locations
+        q_s = self._source()
+        super().__call__(c, q_s)
+
+    def derivative(self):
+        return compute_gradient(
+            self.functional, self.control[0], tape=self.tape)
+
+    def _source(self):
+        with stop_annotating():
+            source_mesh = VertexOnlyMesh(mesh, [source_locations])
+            V_s = FunctionSpace(source_mesh, "DG", 0)
+            d_s = Function(V_s)
+            d_s.assign(1.0 * 0.0714 * 0.0714 * 1000.)
+
+            source_cofunction = assemble(d_s * TestFunction(V_s) * dx)
+            q_s = Cofunction(V.dual()).interpolate(source_cofunction)
+
+            return q_s.riesz_representation("L2")
 
 
 solver_parameters = {"mat_type": "matfree", "ksp_type": "preonly", "pc_type": "jacobi"}
